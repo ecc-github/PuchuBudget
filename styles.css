@@ -1,0 +1,68 @@
+/* styles.css */
+
+/* Optional: subtle zebra striping for all table bodies */
+tbody tr:nth-child(even) td {
+  background-color: #f9fafb;
+}
+
+/* Make pill badges slightly more rounded on very small screens if you want */
+.badge-pill {
+  border-radius: 9999px;
+}
+/* Simple fade-in for delete overlay */
+#deleteOverlay {
+  opacity: 0;
+  transition: opacity 150ms ease-out;
+}
+
+#deleteOverlay.show {
+  opacity: 1;
+}
+
+.budget-good {
+  color: #0f9d5a;            /* Tailwind emerald-600 equivalent */
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.budget-bad {
+  color: #dc2626;            /* Tailwind red-600 equivalent */
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.budget-muted {
+  color: #64748b;            /* Tailwind slate-500 */
+  font-size: 0.85rem;
+}
+
+.category-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 100px;    /* adjust as needed */
+  max-width: 100px;    /* ensures uniform size */
+  text-align: center;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.category-item {
+  padding: 8px 10px;
+  font-size: 0.875rem;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: background 120ms ease, color 120ms ease, font-weight 120ms ease;
+}
+
+/* Lighter hover + rounded + bold text */
+.cat-groceries:hover    { background: #dcfce7; color: #065f46; border-radius: 6px; font-weight: 600; }
+.cat-dining:hover       { background: #ffe4e6; color: #9f1239; border-radius: 6px; font-weight: 600; }
+.cat-personal:hover     { background: #e0e7ff; color: #3730a3; border-radius: 6px; font-weight: 600; }
+.cat-housing:hover      { background: #fef3c7; color: #92400e; border-radius: 6px; font-weight: 600; }
+.cat-transport:hover    { background: #e0f2fe; color: #075985; border-radius: 6px; font-weight: 600; }
+.cat-subs:hover         { background: #fae8ff; color: #86198f; border-radius: 6px; font-weight: 600; }
+.cat-utilities:hover    { background: #cffafe; color: #0e7490; border-radius: 6px; font-weight: 600; }
+.cat-savings:hover      { background: #ecfccb; color: #4d7c0f; border-radius: 6px; font-weight: 600; }
+.cat-misc:hover         { background: #e2e8f0; color: #334155; border-radius: 6px; font-weight: 600; }
