@@ -65,4 +65,20 @@ tbody tr:nth-child(even) td {
 .cat-subs:hover         { background: #fae8ff; color: #86198f; border-radius: 6px; font-weight: 600; }
 .cat-utilities:hover    { background: #cffafe; color: #0e7490; border-radius: 6px; font-weight: 600; }
 .cat-savings:hover      { background: #ecfccb; color: #4d7c0f; border-radius: 6px; font-weight: 600; }
+.cat-health:hover       { background: #ccfbf1; color: #115e59; border-radius: 6px; font-weight: 600; } /* 👈 NEW */
 .cat-misc:hover         { background: #e2e8f0; color: #334155; border-radius: 6px; font-weight: 600; }
+
+
+/* Account 3-way toggle */
+.account-toggle-btn {
+  font-size: 0.75rem;
+  padding: 0.35rem 0.4rem;
+  border-radius: 9999px;
+  border: 1px solid transparent;
+  background: #e5e7eb;   /* slate-200 */
+  color: #0f172a;        /* slate-900 */
+  font-weight: 500;
+  text-align: center;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
