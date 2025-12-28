@@ -1,1012 +1,580 @@
-// script.js — Google Sheets backend, static categories, smooth sync
-
-// ======= CONFIG =======
-const API_URL =
-  "https://script.google.com/macros/s/AKfycbxicn20ypSOpKqnzlzexzYk28wOgnMkJtVRb5KfSqYgeyqOEwK-6iuU9buP0_YtHZ8/exec";
-
-// ======= STATE =======
-let budgets = [];
-let transactions = [];
+// ======= CONFIG & STATE =======
+const API_URL = "https://script.google.com/macros/s/AKfycbwlvPAHEA0RX9ymn2tCmxgL7MoNxTHr8jvfBY3qbU07927ULEJR95ldf06G3c6l2CE/exec";
+const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 let deletePendingIndex = null;
-
-// NEW: currently selected account for new transactions
-let currentAccount = "Joint";
-
-// Multi-account filter for the table ("All", "Ayush", "Joint", "Nupur")
-let activeAccountFilters = ["All"];
-let activeCategoryFilters = ["All"];
-// ======= CATEGORY STYLES (for pills) =======
+let budgets = [], transactions = [], activeTransactionId = null, currentAccount = "Joint", activeAccountFilters = ["All"], activeCategoryFilters = ["All"];
+let editAccount = "Joint"; // Separate state for the modal
 const CATEGORY_STYLES = {
-  "Groceries":         "bg-emerald-50 text-emerald-700",
-  "Dining out":        "bg-rose-50 text-rose-700",
-  "Personal spending": "bg-indigo-50 text-indigo-700",
-  "Housing":           "bg-amber-50 text-amber-700",
-  "Transportation":    "bg-sky-50 text-sky-700",
-  "Subscriptions":     "bg-fuchsia-50 text-fuchsia-700",
-  "Utilities":         "bg-cyan-50 text-cyan-700",
-  "Savings":           "bg-lime-50 text-lime-700",
-  "Health":            "bg-teal-50 text-teal-700",  
-  "Miscellaneous":     "bg-slate-100 text-slate-700",
-  "Uncategorized":     "bg-slate-100 text-slate-700",
+  "Groceries": "bg-emerald-50 text-emerald-700", "Dining out": "bg-rose-50 text-rose-700", "Personal spending": "bg-indigo-50 text-indigo-700",
+  "Housing": "bg-amber-50 text-amber-700", "Transportation": "bg-sky-50 text-sky-700", "Subscriptions": "bg-fuchsia-50 text-fuchsia-700",
+  "Utilities": "bg-cyan-50 text-cyan-700", "Savings": "bg-lime-50 text-lime-700", "Health": "bg-teal-50 text-teal-700",
+  "Miscellaneous": "bg-slate-100 text-slate-700", "Uncategorized": "bg-slate-100 text-slate-700"
 };
 
-// Hex colors for Plotly nodes/links (roughly matching the pills)
 const CATEGORY_COLOR_HEX = {
-  "Groceries":         "#22c55e", // emerald-500
-  "Dining out":        "#f97373", // rose-ish
-  "Personal spending": "#6366f1", // indigo-500
-  "Housing":           "#f59e0b", // amber-500
-  "Transportation":    "#0ea5e9", // sky-500
-  "Subscriptions":     "#e879f9", // fuchsia-400
-  "Utilities":         "#06b6d4", // cyan-500
-  "Savings":           "#65a30d", // lime-600
-  "Health":            "#14b8a6", // teal-500
-  "Miscellaneous":     "#64748b", // slate-500
-  "Uncategorized":     "#94a3b8"  // slate-400
+  "Groceries": "#22c55e", "Dining out": "#f97373", "Personal spending": "#6366f1", "Housing": "#f59e0b", "Transportation": "#0ea5e9",
+  "Subscriptions": "#e879f9", "Utilities": "#06b6d4", "Savings": "#65a30d", "Health": "#14b8a6", "Miscellaneous": "#64748b", "Uncategorized": "#94a3b8"
 };
+// ======= SANKEY: AUTO-FIT + NO-REDRAW RESIZE =======
+let _sankeyRO = null;
+let _sankeyInitialized = false;
+let _sankeyLastSig = "";
 
+function ensureSankeyAutoFit() {
+  const sDiv = document.getElementById("reportSankey");
+  if (!sDiv || _sankeyRO) return;
 
-const MONTH_NAMES = [
-  "January", "February", "March", "April", "May", "June",
-  "July", "August", "September", "October", "November", "December"
-];
+  // Ensure the container can actually have a height:
+  sDiv.style.width = "100%";
+  sDiv.style.height = "100%";
+
+  _sankeyRO = new ResizeObserver(() => {
+    if (window.Plotly && sDiv && sDiv.data) {
+      // Resize without re-plotting
+      Plotly.Plots.resize(sDiv);
+    }
+  });
+  _sankeyRO.observe(sDiv);
+}
 
 // ======= API HELPERS =======
-
-// GET: load everything from Google Sheets (only on init)
 async function loadStateFromSheet() {
   const res = await fetch(API_URL);
-
-  if (!res.ok) {
-    throw new Error("Failed to load data from Google Sheets");
-  }
-
+  if (!res.ok) throw new Error("Failed to load data");
   const data = await res.json();
-  console.log("Loaded from sheet:", data);
-
   budgets = data.budgets || [];
-  transactions = (data.transactions || []).map(t => ({
-    ...t,
-    account: t.account || "Joint",   // 👈 default if missing
-  }));
+  transactions = (data.transactions || []).map(t => ({ ...t, account: t.account || "Joint" }));
 }
 
+const saveStateToSheet = async () => {
+  try { await fetch(API_URL, { method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify({ budgets, transactions }) }); }
+  catch (err) { console.error("Save failed:", err); }
+};
+// Make sheet reload callable from the tab script
+window.reloadStateFromSheet = async function () {
+  await loadStateFromSheet();
+  refreshUI(); // refreshUI already sorts via sortTransactions()
+};
 
-// POST: save everything to Google Sheets (fire-and-forget)
-async function saveStateToSheet() {
-  try {
-    await fetch(API_URL, {
-      method: "POST",
-      headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({ budgets, transactions }),
-    });
-  } catch (err) {
-    console.error("Failed to save data to Google Sheets:", err);
+
+// ======= UTILS: Date & Currency =======
+const formatCurrency = n => (isNaN(n) || n === null) ? "$0.00" : "$" + Number(n).toFixed(2);
+const sortTransactions = () => {
+  transactions.sort((a, b) => {
+    const da = parseMMDDYYYY(normalizeDateForSheetJS(a.date))?.getTime() || 0;
+    const db = parseMMDDYYYY(normalizeDateForSheetJS(b.date))?.getTime() || 0;
+    return db - da; // newest first
+  });
+};
+
+const parseDateParts = (s) => {
+  const dt = new Date(s);
+  if (isNaN(dt.getTime())) return null;
+  return {
+    mm: String(dt.getMonth() + 1).padStart(2, "0"),
+    dd: String(dt.getDate()).padStart(2, "0"),
+    yyyy: dt.getFullYear()
+  };
+};
+
+// Replace your current normalizeDateForSheetJS with this:
+function normalizeDateForSheetJS(dateInput) {
+  if (!dateInput) return "";
+  
+  // If it's already a Date object, extract local parts
+  if (dateInput instanceof Date) {
+    const mm = String(dateInput.getMonth() + 1).padStart(2, "0");
+    const dd = String(dateInput.getDate()).padStart(2, "0");
+    const yyyy = dateInput.getFullYear();
+    return `${mm}/${dd}/${yyyy}`;
   }
-}
-
-// Normalize to MM/DD/YYYY for saving to / reading from Sheets
-function normalizeDateForSheetJS(raw) {
-  if (!raw) return "";
-
-  const s = String(raw).trim();
-
-  // MM/DD/YYYY
-  if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) {
-    return s;
-  }
-
-  // YYYY-MM-DD
+  
+  // If it's a string from HTML input (YYYY-MM-DD)
+  const s = String(dateInput).trim();
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
     const [y, m, d] = s.split("-");
     return `${m}/${d}/${y}`;
   }
 
-  // ISO datetime like 2025-11-01T04:00:00.000Z
-  if (/^\d{4}-\d{2}-\d{2}T/.test(s)) {
-    const dt = new Date(s);
-    if (!isNaN(dt.getTime())) {
-      const mm = String(dt.getMonth() + 1).padStart(2, "0");
-      const dd = String(dt.getDate()).padStart(2, "0");
-      const yyyy = dt.getFullYear();
-      return `${mm}/${dd}/${yyyy}`;
-    }
-  }
-
-  // Fallback: try as Date
-  const dt2 = new Date(s);
-  if (!isNaN(dt2.getTime())) {
-    const mm = String(dt2.getMonth() + 1).padStart(2, "0");
-    const dd = String(dt2.getDate()).padStart(2, "0");
-    const yyyy = dt2.getFullYear();
-    return `${mm}/${dd}/${yyyy}`;
-  }
-
-  return s;
+  return s; // Return as-is if already MM/DD/YYYY
 }
 
-// ======= UTIL: Currency & Date Display =======
-function formatCurrency(n) {
-  if (isNaN(n) || n === null) return "$0.00";
-  return "$" + Number(n).toFixed(2);
-}
+const formatDateForDisplay = v => normalizeDateForSheetJS(v);
+const parseMMDDYYYY = (s) => {
+  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(String(s || "").trim());
+  if (!m) return null;
+  return new Date(Number(m[3]), Number(m[1]) - 1, Number(m[2]));
+};
 
-function formatDateForDisplay(value) {
-  if (!value) return "";
-
-  const s = String(value).trim();
-
-  // MM/DD/YYYY
-  if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) {
-    return s;
-  }
-
-  // YYYY-MM-DD
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-    const [y, m, d] = s.split("-");
-    return `${m}/${d}/${y}`;
-  }
-
-  // ISO datetime
-  if (/^\d{4}-\d{2}-\d{2}T/.test(s)) {
-    const dt = new Date(s);
-    if (!isNaN(dt.getTime())) {
-      const mm = String(dt.getMonth() + 1).padStart(2, "0");
-      const dd = String(dt.getDate()).padStart(2, "0");
-      const yyyy = dt.getFullYear();
-      return `${mm}/${dd}/${yyyy}`;
-    }
-  }
-
-  // Fallback: Date object
-  const dt2 = new Date(s);
-  if (!isNaN(dt2.getTime())) {
-    const mm = String(dt2.getMonth() + 1).padStart(2, "0");
-    const dd = String(dt2.getDate()).padStart(2, "0");
-    const yyyy = dt2.getFullYear();
-    return `${mm}/${dd}/${yyyy}`;
-  }
-
-  return s;
-}
-
-// ======= UTIL: Budgets ↔ Month/Year helpers =======
-
-// Parse the Month / Year input into { monthName, year }
+// ======= UTILS: Budget Parsing =======
 function parseMonthInputValue(value) {
   if (!value) return { monthName: "", year: null };
-
-  const s = String(value).trim();
-
-  // Case 1: "YYYY-MM" (legacy / safety)
-  if (/^\d{4}-\d{1,2}$/.test(s)) {
-    const [yStr, mStr] = s.split("-");
-    const year = Number(yStr);
-    const idx  = Math.max(0, Math.min(11, parseInt(mStr, 10) - 1));
-    const monthName = MONTH_NAMES[idx] || "";
-    return { monthName, year };
+  const s = String(value).trim(), mLegacy = /^\d{4}-\d{1,2}$/.exec(s), mFormat = /^([A-Za-z]+)\s+'?(\d{2,4})$/.exec(s);
+  if (mLegacy) {
+    const [y, m] = s.split("-");
+    return { monthName: MONTH_NAMES[parseInt(m) - 1], year: Number(y) };
   }
-
-  // Case 2: "January '25" or "January 2025"
-  const m = /^([A-Za-z]+)\s+'?(\d{2,4})$/.exec(s);
-  if (m) {
-    const rawName = m[1];
-    let yearNum   = Number(m[2]);
-
-    if (yearNum < 100) {
-      // Treat 2-digit years as 20xx
-      yearNum += 2000;
-    }
-
-    // Normalize month name capitalization
-    const monthName =
-      rawName.charAt(0).toUpperCase() + rawName.slice(1).toLowerCase();
-
-    return { monthName, year: yearNum };
+  if (mFormat) {
+    let y = Number(mFormat[2]);
+    return { monthName: mFormat[1].charAt(0).toUpperCase() + mFormat[1].slice(1).toLowerCase(), year: y < 100 ? y + 2000 : y };
   }
-
-  // Fallback: try parsing as Date
   const dt = new Date(s);
-  if (!isNaN(dt.getTime())) {
-    const year      = dt.getFullYear();
-    const monthName = MONTH_NAMES[dt.getMonth()] || "";
-    return { monthName, year };
-  }
-
-  return { monthName: "", year: null };
+  return dt.getTime() ? { monthName: MONTH_NAMES[dt.getMonth()], year: dt.getFullYear() } : { monthName: "", year: null };
 }
 
-function getBudgetEntryForMonthInput(value) {
-  const { monthName, year } = parseMonthInputValue(value);
-  if (!monthName || !year) return null;
+const getBudgetEntryForMonthInput = (v) => {
+  const { monthName: m, year: y } = parseMonthInputValue(v);
+  return budgets.find(b => b.month?.toLowerCase() === m?.toLowerCase() && Number(b.year) === y) || null;
+};
 
-  const wantedMonth = monthName.trim().toLowerCase();
-  const wantedYear  = Number(year);
-
-  return (
-    budgets.find((b) => {
-      const bm = String(b.month || "").trim().toLowerCase();
-      const by = Number(b.year);
-      return bm === wantedMonth && by === wantedYear;
-    }) || null
-  );
-}
-
-function upsertBudgetForMonthInput(value, budgetAmount) {
+function upsertBudgetForMonthInput(value, amount) {
   const { monthName, year } = parseMonthInputValue(value);
   if (!monthName || !year) return;
-
-  const wantedMonth = monthName.trim().toLowerCase();
-  const wantedYear  = Number(year);
-
-  let found = false;
-  for (let i = 0; i < budgets.length; i++) {
-    const b  = budgets[i];
-    const bm = String(b.month || "").trim().toLowerCase();
-    const by = Number(b.year);
-
-    if (bm === wantedMonth && by === wantedYear) {
-      budgets[i] = {
-        month: monthName,
-        year: year,
-        budget: Number(budgetAmount) || 0,
-      };
-      found = true;
-      break;
-    }
-  }
-
-  if (!found) {
-    budgets.push({
-      month: monthName,
-      year: year,
-      budget: Number(budgetAmount) || 0,
-    });
-  }
+  const idx = budgets.findIndex(b => b.month?.toLowerCase() === monthName.toLowerCase() && Number(b.year) === year);
+  const entry = { month: monthName, year, budget: Number(amount) || 0 };
+  idx > -1 ? budgets[idx] = entry : budgets.push(entry);
 }
 
-
-// ======= RENDER: TRANSACTIONS TABLE =======
-
+// ======= RENDER & STATS =======
 function getSelectedYearMonth() {
-  const monthInput = document.getElementById("budgetMonthYear");
-  if (!monthInput || !monthInput.value || !monthInput.value.includes("-")) {
-    return null;
-  }
-
-  const [yStr, mStr] = monthInput.value.split("-");
-  const year = Number(yStr);
-  const month = Number(mStr);
-
-  if (isNaN(year) || isNaN(month)) return null;
-  return { year, month };
+  const v = document.getElementById("budgetMonthYear")?.value;
+  if (!v || !v.includes("-")) return null;
+  const [y, m] = v.split("-").map(Number);
+  return { year: y, month: m };
 }
 
-
-
-function updateHeaderStats(visibleTransactions) {
-  const primaryEls = [
-    document.getElementById("monthHeaderPrimary"),
-    document.getElementById("tableHeaderPrimary")
-  ];
-
-  const secondaryEls = [
-    document.getElementById("monthHeaderSecondary"),
-    document.getElementById("tableHeaderSecondary")
-  ];
-
-  const ym = getSelectedYearMonth();
-
-  // ---- Total spent (only from visible rows) ----
-  let totalSpent = 0;
-  visibleTransactions.forEach((t) => {
-    const n = Number(t.amount);
-    if (!isNaN(n)) totalSpent += n;
-  });
-
-  const count      = visibleTransactions.length;
-  const totalLabel = `Total ${formatCurrency(totalSpent)}`;
-  const txLabel    = count === 1 ? "1 transaction" : `${count} transactions`;
-
-  // ---- Budget logic ----
-  let secondaryText  = "";
-  let state          = "muted"; // "good" | "bad" | "muted"
-
-  if (!ym) {
-    secondaryText = "Available budget: —";
-    state = "muted";
-  } else {
-    const key   = `${ym.year}-${String(ym.month).padStart(2, "0")}`;
-    const entry = getBudgetEntryForMonthInput(key);
-
-    if (!entry || entry.budget == null || Number(entry.budget) === 0) {
-      secondaryText = "Available budget: —";
-      state = "muted";
-    } else {
-      const budget    = Number(entry.budget) || 0;
-      const remaining = budget - totalSpent;
-
-      if (remaining >= 0) {
-        secondaryText = `Available budget: ${formatCurrency(remaining)}`;
-        state = "good";
-      } else {
-        secondaryText = `Over budget by ${formatCurrency(Math.abs(remaining))}`;
-        state = "bad";
-      }
-    }
+function updateHeaderStats(visible) {
+  const ym = getSelectedYearMonth(), totalSpent = visible.reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
+  const entry = ym ? getBudgetEntryForMonthInput(`${ym.year}-${String(ym.month).padStart(2, "0")}`) : null;
+  const budget = Number(entry?.budget) || 0;
+  
+  let secText = "Available budget: —", state = "muted";
+  if (ym && budget > 0) {
+    const rem = budget - totalSpent;
+    secText = rem >= 0 ? `Available budget: ${formatCurrency(rem)}` : `Over budget by ${formatCurrency(Math.abs(rem))}`;
+    state = rem >= 0 ? "good" : "bad";
   }
 
-  // ---- APPLY PRIMARY LINE (Total + count) ----
-  primaryEls.forEach((el) => {
-    if (!el) return;
-    el.innerHTML = `
-      <span>${totalLabel}</span>
-      <span class="ml-auto text-[11px] sm:text-xs font-normal text-slate-500">
-        ${txLabel}
-      </span>
-    `;
+  [document.getElementById("monthHeaderPrimary"), document.getElementById("tableHeaderPrimary")].forEach(el => {
+    if (el) el.innerHTML = `<span>Total ${formatCurrency(totalSpent)}</span><span class="ml-auto text-[11px] sm:text-xs font-normal text-slate-500">${visible.length === 1 ? "1 transaction" : visible.length + " transactions"}</span>`;
   });
 
-  // ---- APPLY SECONDARY LINE (with inline styles) ----
-  secondaryEls.forEach((el) => {
+  [document.getElementById("monthHeaderSecondary"), document.getElementById("tableHeaderSecondary")].forEach(el => {
     if (!el) return;
-
-    // Base text
-    el.textContent = secondaryText;
-
-    // Reset styles first
-    el.style.color      = "#64748b";  // default slate-ish
-    el.style.fontSize   = "0.85rem";
-    el.style.fontWeight = "400";
-
-    if (state === "good") {
-      el.style.color      = "#0f9d5a"; // emerald-ish
-      el.style.fontWeight = "700";
-    } else if (state === "bad") {
-      el.style.color      = "#dc2626"; // red-ish
-      el.style.fontWeight = "700";
-    }
+    el.textContent = secText;
+    el.style.color = state === "good" ? "#0f9d5a" : (state === "bad" ? "#dc2626" : "#64748b");
+    el.style.fontWeight = state === "muted" ? "400" : "700";
   });
 }
 
-
-
-// Return the list of transactions for the currently selected month/year
 function getVisibleTransactionsForCurrentMonth() {
   const ym = getSelectedYearMonth();
-
-  // Start from all transactions
-  let list = transactions.slice();
-
-  // Filter by selected month/year (if any)
-  if (ym) {
-    list = list.filter((t) => {
-      if (!t.date) return false;
-
-      const s = String(t.date).trim();
-
-      // Expecting MM/DD/YYYY
-      const match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(s);
-      if (!match) {
-        // Fallback: try Date parsing if format is weird
-        const dt = new Date(s);
-        if (isNaN(dt.getTime())) return false;
-        const m = dt.getMonth() + 1;
-        const y = dt.getFullYear();
-        return m === ym.month && y === ym.year;
-      }
-
-      const m = Number(match[1]); // month
-      const y = Number(match[3]); // year
-
-      return m === ym.month && y === ym.year;
-    });
-  }
-
-  // 🔍 Filter by account(s) if not "All"
-  if (!activeAccountFilters.includes("All")) {
-    list = list.filter((t) => {
-      const acct = t.account || "Joint";
-      return activeAccountFilters.includes(acct);
-    });
-  }
-
-  // 🔍 Filter by category/ies if not "All"
-  if (!activeCategoryFilters.includes("All")) {
-    list = list.filter((t) => {
-      const cat = t.category || "Uncategorized";
-      return activeCategoryFilters.includes(cat);
-    });
-  }
-
-  return list;
-}
-
-// Return all transactions for the selected month/year (ignores account filters)
-function getMonthTransactionsAllAccounts() {
-  const ym = getSelectedYearMonth();
-  if (!ym) return [];
-
-  return transactions.filter((t) => {
+  return transactions.filter(t => {
     if (!t.date) return false;
-
-    const s = String(t.date).trim();
-
-    // Expecting MM/DD/YYYY
-    const match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(s);
-    if (!match) {
-      // Fallback: Date parse
-      const dt = new Date(s);
-      if (isNaN(dt.getTime())) return false;
-      const m = dt.getMonth() + 1;
-      const y = dt.getFullYear();
-      return m === ym.month && y === ym.year;
-    }
-
-    const m = Number(match[1]);
-    const y = Number(match[3]);
-    return m === ym.month && y === ym.year;
+    const match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(String(t.date).trim());
+    const m = match ? Number(match[1]) : new Date(t.date).getMonth() + 1;
+    const y = match ? Number(match[3]) : new Date(t.date).getFullYear();
+    const acct = t.account || "Joint", cat = t.category || "Uncategorized";
+    const monthMatch = ym ? (m === ym.month && y === ym.year) : true;
+    const acctMatch = activeAccountFilters.includes("All") || activeAccountFilters.includes(acct);
+    const catMatch = activeCategoryFilters.includes("All") || activeCategoryFilters.includes(cat);
+    return monthMatch && acctMatch && catMatch;
   });
 }
-
 
 function renderTransactions() {
   const tbody = document.getElementById("transactionsTableBody");
   if (!tbody) return;
-
   tbody.innerHTML = "";
 
-  // Decide which transactions are visible based on the selected month/year
-  const visibleTransactions = getVisibleTransactionsForCurrentMonth();
-
-  visibleTransactions.forEach((t) => {
+  const visible = getVisibleTransactionsForCurrentMonth();
+  visible.forEach(t => {
     const tr = document.createElement("tr");
-    tr.className = "hover:bg-slate-50 cursor-pointer";
-
-    // Find the original index in the master transactions array
-    const originalIndex = transactions.indexOf(t);
-
-    // Date + small account dot
-    const tdDate = document.createElement("td");
-    tdDate.className = "px-2 sm:px-3 py-1.5 text-slate-800 whitespace-nowrap";
-
     const acct = t.account || "Joint";
-    const dotClass =
-      acct === "Ayush" ? "bg-sky-500" :
-      acct === "Nupur" ? "bg-rose-500" :
-      "";
+    const rawCat = (t.category || "Uncategorized").trim();
+    const dot = acct === "Ayush" ? "bg-sky-500" : (acct === "Nupur" ? "bg-rose-500" : "");
 
-    tdDate.innerHTML = `
-      <div class="flex items-center gap-1.5">
-        ${
-          dotClass
-            ? `<span class="inline-block w-1.5 h-1.5 rounded-full ${dotClass}"></span>`
-            : ""
-        }
-        <span>${formatDateForDisplay(t.date)}</span>
-      </div>
-    `;
+    // Modern "Repeat" SVG with stroke for a lighter, cleaner feel
+    const isRec = t.recurring === "Yes";
+    const recurringIcon = isRec ? `
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-3 h-3 text-slate-400">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
+      </svg>` : "";
 
+    tr.className = "hover:bg-slate-50 cursor-pointer";
+    tr.innerHTML = `
+      <td class="px-2 sm:px-3 py-1.5 text-slate-800 whitespace-nowrap">
+        <div class="flex items-center gap-1.5">
+          ${dot ? `<span class="inline-block w-1.5 h-1.5 rounded-full ${dot}"></span>` : ""}
+          <span>${formatDateForDisplay(t.date)}</span>
+        </div>
+      </td>
+      <td class="px-2 sm:px-3 py-1.5 text-slate-800">${t.desc || ""}</td>
+      <td class="px-2 sm:px-3 py-1.5">
+        <span class="category-pill rounded-full px-2 py-0.5 text-[11px] font-medium ${CATEGORY_STYLES[rawCat] || CATEGORY_STYLES["Miscellaneous"]}">
+          ${rawCat.length > 16 ? rawCat.slice(0, 15) + "…" : rawCat}
+        </span>
+      </td>
+      <td class="px-2 sm:px-3 py-1.5 text-right">
+        <div class="flex items-center justify-end gap-1.5">
+          ${recurringIcon}
+          <span class="text-slate-800 whitespace-nowrap font-medium">${formatCurrency(t.amount || 0)}</span>
+        </div>
+      </td>`;
 
+tr.onclick = () => {
+  deletePendingIndex = transactions.indexOf(t);
+const norm = normalizeDateForSheetJS(t.date);
+if (!norm) return;
+const [m, d, y] = norm.split("/");
 
-    // Description
-    const tdDesc = document.createElement("td");
-    tdDesc.className = "px-2 sm:px-3 py-1.5 text-slate-800";
-    tdDesc.textContent = t.desc || "";
-
-    // Category pill
-    const tdCat = document.createElement("td");
-    tdCat.className = "px-2 sm:px-3 py-1.5";
-
-    const rawCatLabel = t.category || "Uncategorized";
-    const MAX_CAT_LEN = 16;
-    let catLabel = rawCatLabel;
-    if (catLabel.length > MAX_CAT_LEN) {
-      catLabel = catLabel.slice(0, MAX_CAT_LEN - 1) + "…";
-    }
-
-    const pillClass =
-      CATEGORY_STYLES[rawCatLabel] || CATEGORY_STYLES["Miscellaneous"];
-
-    tdCat.innerHTML = `
-      <span class="category-pill rounded-full px-2 py-0.5 text-[11px] font-medium ${pillClass}">
-        ${catLabel}
-      </span>
-    `;
-
-    // Amount
-    const tdAmt = document.createElement("td");
-    tdAmt.className =
-      "px-2 sm:px-3 py-1.5 text-right text-slate-800 whitespace-nowrap";
-    tdAmt.textContent = formatCurrency(t.amount || 0);
-
-    // Append tds
-    tr.appendChild(tdDate);
-    tr.appendChild(tdDesc);
-    tr.appendChild(tdCat);
-    tr.appendChild(tdAmt);
-
-    // Clicking the row opens overlay asking to delete
-    tr.addEventListener("click", () => {
-      // Store the index in the full transactions[] array
-      deletePendingIndex = originalIndex;
-
-      const overlay = document.getElementById("deleteOverlay");
-      const textEl = document.getElementById("deleteOverlayText");
-
-      if (textEl) {
-        textEl.textContent =
-          `${formatDateForDisplay(t.date)} — ${t.desc || "No description"} · ${formatCurrency(t.amount)}`;
-      }
-
-      if (overlay) {
-        overlay.classList.remove("hidden");
-        overlay.classList.add("show");
-      }
-    });
+  // Set Field Values
+  el("editDate").value = `${y}-${m}-${d}`;
+  el("editDesc").value = t.desc || "";
+  el("editAmt").value = t.amount || 0;
+  el("editCat").value = t.category || "Uncategorized";
+  el("editRecurring").checked = t.recurring === "Yes";
+  editAccount = t.account || "Joint"; // Set internal state
+  
+  window.applyEditAccountStyles?.();
+ // UI update for buttons
+  el("deleteOverlay").classList.remove("hidden");
+  el("deleteOverlay").classList.add("show");
+};
 
     tbody.appendChild(tr);
   });
 
-  // Update small "X transactions" label
-  const counterEl = document.getElementById("transactionCountLabel");
-  if (counterEl) {
-    counterEl.textContent =
-      `${visibleTransactions.length} transaction` +
-      (visibleTransactions.length === 1 ? "" : "s");
-  }
-
-  // Update the summary header under the inputs
-  updateHeaderStats(visibleTransactions);
+  const counter = document.getElementById("transactionCountLabel");
+  if (counter) counter.textContent = `${visible.length} transaction${visible.length === 1 ? "" : "s"}`;
+  updateHeaderStats(visible);
 }
-
-
-// ======= MAIN REFRESH =======
-function refreshUI() {
-  renderTransactions();
-  renderReportSankey();
-}
-
-
+const el = id => document.getElementById(id);
+const refreshUI = () => { 
+  sortTransactions(); 
+  renderTransactions(); 
+  renderReportSankey(); 
+};
 function renderReportSankey() {
-  const sankeyDiv   = document.getElementById("reportSankey");
-  const detailsDiv  = document.getElementById("reportDetails");
-  if (!sankeyDiv || !detailsDiv) return;
+  const sDiv = el("reportSankey"), dDiv = el("reportDetails");
+  if (!sDiv || !dDiv) return;
 
-  // 🚫 Don't render while the Report tab is hidden (Plotly gets bad width)
-  const reportCardSection = document.getElementById("reportCard");
-  if (reportCardSection && reportCardSection.classList.contains("hidden")) {
-    return;
-  }
+  ensureSankeyAutoFit();
 
-  // Clear details text if any
-  detailsDiv.innerHTML = `
-    <p class="text-[11px] sm:text-xs text-slate-500">
-      Click a category node to see line items here.
-    </p>
-  `;
+  const hexToRgba = (hex, alpha) => {
+    const r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  };
 
+  const normCat = v => (v == null || v === "" ? "Uncategorized" : String(v)).trim();
+  
+  // 1. Calculate Data & Signature FIRST (Don't touch the DOM yet)
   const ym = getSelectedYearMonth();
-  if (!ym) {
-    sankeyDiv.innerHTML = `
-      <div class="text-xs sm:text-sm text-slate-500">
-        Select a month to see the report.
-      </div>
-    `;
-    return;
-  }
-
-  // Transactions for current month + current account filters
   const monthTx = getVisibleTransactionsForCurrentMonth();
-  if (monthTx.length === 0) {
-    sankeyDiv.innerHTML = ``;
+
+  if (!ym || !monthTx.length) {
+    // If no data, we DO want to reset everything
+    dDiv.innerHTML = `<p class="text-[11px] sm:text-xs text-slate-500">No transactions to show.</p>`;
+    sDiv.innerHTML = ym
+      ? '<div class="text-xs p-4 text-slate-500">No transactions found for this month.</div>'
+      : '<div class="text-xs p-4 text-slate-500">Select a month...</div>';
+    _sankeyInitialized = false;
+    _sankeyLastSig = "";
     return;
   }
 
-  // Sum amounts by category
-  const categoryTotals = {};
+  // Aggregate Data
   let totalSpent = 0;
+  const catTotals = monthTx.reduce((acc, t) => {
+    const c = normCat(t.category);
+    const a = Number(t.amount) || 0;
+    acc[c] = (acc[c] || 0) + a;
+    totalSpent += a;
+    return acc;
+  }, {});
 
-  monthTx.forEach((t) => {
-    const cat = t.category || "Uncategorized";
-    const amt = Number(t.amount) || 0;
-    if (!categoryTotals[cat]) categoryTotals[cat] = 0;
-    categoryTotals[cat] += amt;
-    totalSpent += amt;
+  const cats = Object.keys(catTotals);
+  // Generate Signature
+  const sig = JSON.stringify({
+    ym,
+    n: monthTx.length,
+    total: Number(totalSpent.toFixed(2)),
+    cats: cats.map(c => [c, Number((catTotals[c] || 0).toFixed(2))])
   });
 
-  const categories = Object.keys(categoryTotals);
-  if (categories.length === 0 || totalSpent === 0) {
-    sankeyDiv.innerHTML = `
-      <div class="text-xs sm:text-sm text-slate-500">
-        No spending recorded yet for this month.
-      </div>
-    `;
-    return;
+  // 2. CHECK: If nothing changed, resize only. DO NOT wipe dDiv.
+  if (_sankeyInitialized && sig === _sankeyLastSig) {
+    requestAnimationFrame(() => window.Plotly?.Plots?.resize?.(sDiv));
+    return; // <--- This exits before wiping your clicked list!
   }
 
-  // ====================== BUILD NODES & LINKS ======================
-  const nodeLabels = [
-    `Total<br>${formatCurrency(totalSpent)}`   // 0
-  ].concat(
-    categories.map(
-      (cat) => `${cat}<br>${formatCurrency(categoryTotals[cat])}`
-    )
-  );
+  // 3. Data Changed: NOW we can reset the list and update the graph
+  _sankeyLastSig = sig;
+  dDiv.innerHTML = `<p class="text-[11px] sm:text-xs text-slate-500">Click a category node to see line items here.</p>`;
 
-  const nodeColors = [
-    "#15803d" // ✅ green Total node
-  ].concat(
-    categories.map((cat) => CATEGORY_COLOR_HEX[cat] || "#e5e7eb")
-  );
+  const labels = [`Total<br>${formatCurrency(totalSpent)}`, ...cats.map(c => `${c}<br>${formatCurrency(catTotals[c])}`)];
+  const nodeColors = ["#c5c5c5ff", ...cats.map(c => CATEGORY_COLOR_HEX[c] || "#e5e7eb")];
+  const linkColors = cats.map(c => hexToRgba(CATEGORY_COLOR_HEX[c] || "#64748b", 0.25));
 
-  const sources    = [];
-  const targets    = [];
-  const values     = [];
-  const linkColors = [];
-
-  const categoryStartIndex = 1;               // categories start at node index 1
-  const MIN_CAT_VAL        = totalSpent > 0 ? totalSpent * 0.05 : 0; // min thickness
-
-  categories.forEach((cat, idx) => {
-    const actual     = Math.abs(categoryTotals[cat]);
-    const displayVal = Math.max(actual, MIN_CAT_VAL);
-
-    sources.push(0);           // from Total
-    targets.push(idx + 1);     // category node
-    values.push(displayVal);
-    linkColors.push(CATEGORY_COLOR_HEX[cat] || "#e5e7eb");
-  });
+  const minV = totalSpent * 0.04;
+  const vals = cats.map(c => Math.max(Math.abs(catTotals[c]), minV));
 
   const data = [{
     type: "sankey",
     orientation: "h",
     node: {
       pad: 15,
-      thickness: 20,
-      line: { color: "#ffffff", width: 1 },
-      label: nodeLabels,
+      thickness: 15,
+      line: { color: "#fff", width: 1 },
+      label: labels,
       color: nodeColors,
       hovertemplate: "%{label}<extra></extra>"
     },
     link: {
-      source: sources,
-      target: targets,
-      value:  values,
-      color:  linkColors
+      source: cats.map(() => 0),
+      target: cats.map((_, i) => i + 1),
+      value: vals,
+      color: linkColors
     }
   }];
 
-  // ====================== LAYOUT (FIT TO CARD WIDTH) ======================
   const layout = {
-    margin: { t: 10, l: 10, r: 10, b: 10 },
+    margin: { t: 5, l: 5, r: 5, b: 5 },
     font: { size: 10 },
     paper_bgcolor: "rgba(0,0,0,0)",
     plot_bgcolor: "rgba(0,0,0,0)",
-    autosize: true,
-    width: sankeyDiv.clientWidth || undefined
+    autosize: true
   };
 
-  Plotly.newPlot(sankeyDiv, data, layout, {
-    displayModeBar: false,
-    responsive: true
-  });
+  const config = { displayModeBar: false, responsive: true };
 
-  if (Plotly.Plots && typeof Plotly.Plots.resize === "function") {
-    Plotly.Plots.resize(sankeyDiv);
+  Plotly.react(sDiv, data, layout, config);
+  _sankeyInitialized = true;
+
+  // Rebind click handler
+  // Note: Since we are using Plotly.react, the DOM element stays, but it's good practice to ensure the handler is there.
+  if (!sDiv._hasSankeyClick) {
+    sDiv._hasSankeyClick = true;
+
+    sDiv.on("plotly_click", ev => {
+      const pt = ev?.points?.[0];
+      if (!pt) return;
+
+      let clickedLabel = "";
+      if (pt.target && pt.target.label) clickedLabel = pt.target.label;
+      else if (pt.label) clickedLabel = pt.label;
+      else clickedLabel = labels[pt.pointNumber] || "";
+
+      const catName = normCat(clickedLabel.split("<br>")[0]);
+      if (!catName || catName === "Total") return;
+
+      const catTx = monthTx
+        .filter(t => normCat(t.category) === catName)
+        .sort((a, b) => Math.abs(Number(b.amount) || 0) - Math.abs(Number(a.amount) || 0));
+
+      const sum = catTx.reduce((s, t) => s + (Number(t.amount) || 0), 0);
+
+      dDiv.innerHTML = `
+        <div class="flex items-center justify-between mb-2">
+          <p class="text-xs font-semibold">${catName} — ${formatCurrency(sum)}</p>
+          <p class="text-[11px] text-slate-500">${catTx.length} items</p>
+        </div>
+        <div class="overflow-hidden border rounded-lg bg-white shadow-sm">
+          <table class="min-w-full text-[11px] sm:text-xs">
+            <thead class="bg-slate-50 sticky top-0">
+              <tr>
+                <th class="px-2 py-1 text-left text-slate-500">Date</th>
+                <th class="px-2 py-1 text-left text-slate-500">Desc</th>
+                <th class="px-2 py-1 text-right text-slate-500">Amt</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100">
+              ${catTx.map(t => `
+                <tr>
+                  <td class="px-2 py-1 text-slate-600">${formatDateForDisplay(t.date)}</td>
+                  <td class="px-2 py-1 text-slate-800">${t.desc || ""}</td>
+                  <td class="px-2 py-1 text-right font-medium">${formatCurrency(t.amount)}</td>
+                </tr>`).join("")}
+            </tbody>
+          </table>
+        </div>`;
+    });
   }
-
-  // ====================== CLICK → LINE ITEMS (SORTED HIGH → LOW) ======================
-  sankeyDiv.on("plotly_click", (ev) => {
-    const p = ev.points && ev.points[0];
-    if (!p) return;
-
-    const nodeIndex = typeof p.pointNumber === "number" ? p.pointNumber : null;
-    if (nodeIndex == null) return;
-
-    // Ignore Total node
-    if (nodeIndex === 0) return;
-
-    // Only respond to real categories
-    if (nodeIndex < categoryStartIndex) return;
-
-    const catIdx   = nodeIndex - categoryStartIndex;
-    const category = categories[catIdx];
-    if (!category) return;
-
-    let catTx = monthTx.filter(
-      (t) => (t.category || "Uncategorized") === category
-    );
-
-    if (catTx.length === 0) {
-      detailsDiv.innerHTML = `
-        <p class="text-[11px] sm:text-xs text-slate-500">
-          No line items for <span class="font-semibold">${category}</span>.
-        </p>
-      `;
-      return;
-    }
-
-    // 🔽 Sort by amount (highest → lowest)
-    catTx = [...catTx].sort((a, b) => {
-      const av = Math.abs(Number(a.amount) || 0);
-      const bv = Math.abs(Number(b.amount) || 0);
-      return bv - av;
-    });
-
-    const totalCat = catTx.reduce(
-      (sum, t) => sum + (Number(t.amount) || 0),
-      0
-    );
-
-    let html = `
-      <div class="flex items-center justify-between mb-2">
-        <p class="text-xs sm:text-sm font-semibold text-slate-900">
-          ${category} — ${formatCurrency(totalCat)}
-        </p>
-        <p class="text-[11px] sm:text-xs text-slate-50ertemplate: "%{label}<0">
-          ${catTx.length} item${catTx.length === 1 ? "" : "s"} (sorted high → low)
-        </p>
-      </div>
-      <div class="max-h-52 overflow-y-auto border border-slate-200 rounded-lg bg-white">
-        <table class="min-w-full text-[11px] sm:text-xs">
-          <thead class="bg-slate-50 text-slate-500">
-            <tr>
-              <th class="px-2 py-1 text-left font-medium">Date</th>
-              <th class="px-2 py-1 text-left font-medium">Description</th>
-              <th class="px-2 py-1 text-right font-medium">Amount</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-slate-100">
-    `;
-
-    catTx.forEach((t) => {
-      html += `
-        <tr>
-          <td class="px-2 py-1">${formatDateForDisplay(t.date)}</td>
-          <td class="px-2 py-1">${t.desc || ""}</td>
-          <td class="px-2 py-1 text-right">${formatCurrency(t.amount || 0)}</td>
-        </tr>
-      `;
-    });
-
-    html += `
-          </tbody>
-        </table>
-      </div>
-    `;
-
-    detailsDiv.innerHTML = html;
-  });
+  
+  requestAnimationFrame(() => Plotly.Plots.resize(sDiv));
 }
-
 
 function initBudgetControls() {
-  const monthInput  = document.getElementById("budgetMonthYear");
-  const budgetInput = document.getElementById("budgetAmount");
-  if (!monthInput || !budgetInput) return;
-
-  // Default underlying value to today's month/year if empty, in "YYYY-MM"
-  if (!monthInput.value) {
-    const now   = new Date();
-    const year  = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, "0");
-    monthInput.value = `${year}-${month}`;
+  const mIn = el("budgetMonthYear"), bIn = el("budgetAmount");
+  if (!mIn || !bIn) return;
+  if (!mIn.value) {
+    const d = new Date();
+    mIn.value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
   }
 
-  // Helper: load budget for current month input's value ("YYYY-MM")
-  function syncBudgetForCurrentMonth() {
-    const entry = getBudgetEntryForMonthInput(monthInput.value);
-    if (entry) {
-      budgetInput.value =
-        entry.budget !== undefined && entry.budget !== null
-          ? entry.budget
-          : "";
-    } else {
-      budgetInput.value = "";
-    }
-  }
+  const sync = () => { const e = getBudgetEntryForMonthInput(mIn.value); bIn.value = e?.budget ?? ""; };
+  const save = () => { if (mIn.value) { upsertBudgetForMonthInput(mIn.value, bIn.value ? Number(bIn.value) : 0); saveStateToSheet(); refreshUI(); } };
 
-  // Initialize Flatpickr month/year picker (if library loaded)
   if (window.flatpickr && window.monthSelectPlugin) {
-    flatpickr(monthInput, {
+    flatpickr(mIn, {
       altInput: true,
-      plugins: [
-        new monthSelectPlugin({
-          shorthand: false,
-          dateFormat: "Y-m",        // internal stored value → 2025-12
-          altFormat: "F \\'y",      // visible to user → December '25
-          theme: "light"
-        })
-      ],
-      defaultDate: monthInput.value,
-      allowInput: false,
-      onChange: function(selectedDates, dateStr) {
-        // dateStr is "YYYY-MM"
-        monthInput.value = dateStr;
-        syncBudgetForCurrentMonth();
-        // 🔥 re-filter transactions whenever month changes
-        refreshUI();
-      }
+      plugins: [new monthSelectPlugin({ shorthand: false, dateFormat: "Y-m", altFormat: "F \\'y", theme: "light" })],
+      defaultDate: mIn.value,
+      onChange: (d, s) => { mIn.value = s; sync(); refreshUI(); }
     });
   }
 
-  // Initial sync from loaded budgets[]
-  syncBudgetForCurrentMonth();
-  // 🔥 initial filter of transactions for the default month
-  refreshUI();
-
-  // Save budget for the selected month/year
-function saveBudgetForCurrentMonth() {
-  const raw = budgetInput.value.trim();
-  const amount = raw ? Number(raw) : 0;
-  if (!monthInput.value) return; // need a month/year
-
-  upsertBudgetForMonthInput(monthInput.value, amount);
-  saveStateToSheet();
-  refreshUI();  // 🔥 update header + table summary immediately
+  sync(); refreshUI();
+  mIn.onchange = () => { sync(); refreshUI(); };
+  ["change", "blur"].forEach(ev => bIn.addEventListener(ev, save));
+  bIn.onkeyup = e => e.key === "Enter" && save();
 }
-
-  // 🔥 if user changes the month via native <input type="month"> (no flatpickr)
-  monthInput.addEventListener("change", () => {
-    syncBudgetForCurrentMonth();
-    refreshUI();   // re-filter table
-  });
-
-  // Save on change, blur, and Enter
-  budgetInput.addEventListener("change", saveBudgetForCurrentMonth);
-  budgetInput.addEventListener("blur", saveBudgetForCurrentMonth);
-  budgetInput.addEventListener("keyup", (e) => {
-    if (e.key === "Enter") saveBudgetForCurrentMonth();
-  });
-}
-
-
 function setupEventHandlers() {
-  const addTransactionBtn = document.getElementById("addTransactionBtn");
-  const overlay           = document.getElementById("deleteOverlay");
-  const deleteCancelBtn   = document.getElementById("deleteCancelBtn");
-  const deleteConfirmBtn  = document.getElementById("deleteConfirmBtn");
-  const categorySelect    = document.getElementById("trxCategory");
+  const ov = el("deleteOverlay");
+  const hideOv = () => { deletePendingIndex = null; ov.classList.remove("show"); setTimeout(() => ov.classList.add("hidden"), 150); };
 
-  // -------------------------------------------
-  // CATEGORY SELECTOR STYLING
-  // -------------------------------------------
-  if (categorySelect) {
-    categorySelect.addEventListener("change", () => {
-      const cat = categorySelect.value;
+  // ======= SMART RECURRING HELPER =======
+  const syncRecurringGroup = (baseTrx) => {
+    if (baseTrx.recurring !== "Yes") return;
 
-      // Remove previous colors
-categorySelect.classList.remove(
-  "cat-groceries","cat-dining","cat-personal","cat-housing",
-  "cat-transport","cat-subs","cat-utilities","cat-savings",
-  "cat-health","cat-misc"     
-);
+    // 1. Remove any existing FUTURE instances of this specific recurring group
+    // This prevents the "double entry" bug
+    transactions = transactions.filter(t => {
+      const isFuture = (parseMMDDYYYY(t.date)?.getTime() || 0) > (parseMMDDYYYY(baseTrx.date)?.getTime() || 0)
 
-if (cat === "Groceries")         categorySelect.classList.add("cat-groceries");
-if (cat === "Dining out")        categorySelect.classList.add("cat-dining");
-if (cat === "Personal spending") categorySelect.classList.add("cat-personal");
-if (cat === "Housing")           categorySelect.classList.add("cat-housing");
-if (cat === "Transportation")    categorySelect.classList.add("cat-transport");
-if (cat === "Subscriptions")     categorySelect.classList.add("cat-subs");
-if (cat === "Utilities")         categorySelect.classList.add("cat-utilities");
-if (cat === "Savings")           categorySelect.classList.add("cat-savings");
-if (cat === "Health")            categorySelect.classList.add("cat-health");  // ⭐ NEW
-if (cat === "Miscellaneous")     categorySelect.classList.add("cat-misc");
-
+      const isSameGroup = t.groupId && t.groupId === baseTrx.groupId;
+      return !(isFuture && isSameGroup);
     });
-  }
 
-if (addTransactionBtn) {
-  addTransactionBtn.addEventListener("click", () => {
-    const dateRaw = document.getElementById("trxDate").value; // "YYYY-MM-DD"
-    const desc    = document.getElementById("trxDesc").value.trim();
+    // 2. Re-propagate through end of next month
+const [m, d, y] = normalizeDateForSheetJS(baseTrx.date).split("/").map(Number);
+    const boundary = new Date(new Date().getFullYear(), new Date().getMonth() + 2, 0);
+    let currM = m, currY = y, safety = 0;
 
-    // 🔥 Read category from the visible label
-    const categoryLabelEl = document.getElementById("categorySelected");
-    let category = "Uncategorized";
+    while (safety < 24) {
+      if (++currM > 12) { currM = 1; currY++; }
+      const loopDate = new Date(currY, currM - 1, d);
+      if (loopDate > boundary) break;
 
-    if (categoryLabelEl) {
-      const txt = categoryLabelEl.textContent.trim();
-      // Treat "Select category" as "no category chosen"
-      if (txt && txt !== "Select category") {
-        category = txt;
-      }
+      transactions.unshift({
+        ...baseTrx,
+        id: Date.now() + (++safety), // Unique ID for sheet
+        date: normalizeDateForSheetJS(loopDate),
+        // Keep the same groupId so they stay linked!
+      });
     }
+  };
 
-    const amountRaw = document.getElementById("trxAmount").value;
-    const amount    = amountRaw ? parseFloat(amountRaw) : NaN;
+  el("deleteCancelBtn").onclick = hideOv;
+  el("deleteConfirmBtn").onclick = () => {
+    if (deletePendingIndex !== null) { transactions.splice(deletePendingIndex, 1); refreshUI(); saveStateToSheet(); }
+    hideOv();
+  };
 
-    if (!amountRaw || isNaN(amount)) {
-      alert("Amount is required.");
-      return;
-    }
+  // ======= ADD TRANSACTION =======
+  el("addTransactionBtn").onclick = () => {
+    const amt = parseFloat(el("trxAmount").value), rawDate = el("trxDate").value;
+    const catLab = el("categorySelected")?.textContent.trim();
+    if (isNaN(amt) || !rawDate) return alert("Amount and Date are required.");
 
-    const dateForSheet = normalizeDateForSheetJS(dateRaw);
+    const [y, m, d] = rawDate.split("-").map(Number);
+    const isRec = el("trxRecurring").checked;
+    
+    const newTrx = {
+      id: Date.now(),
+      groupId: isRec ? Date.now() : null, // Create a unique link for this series
+      date: `${String(m).padStart(2, '0')}/${String(d).padStart(2, '0')}/${y}`,
+      desc: el("trxDesc").value.trim(),
+      category: (!catLab || catLab === "Select category") ? "Uncategorized" : catLab,
+      amount: amt,
+      account: currentAccount,
+      recurring: isRec ? "Yes" : "No"
+    };
 
-    console.log("Adding transaction with category:", category);
+    transactions.unshift(newTrx);
+    if (isRec) syncRecurringGroup(newTrx);
+    
+    el("trxAmount").value = el("trxDesc").value = "";
+    el("trxRecurring").checked = false;
+    refreshUI(); saveStateToSheet();
+  };
 
-    // Optimistic add — NEWEST FIRST
-  transactions.unshift({
-    id: Date.now(),
-    date: dateForSheet,
-    desc,
-    category,
-    amount,
-    account: currentAccount,   // 👈 NEW
-  });
+  // ======= EDIT MODAL =======
+  const applyEditAccountStyles = () => {
+    document.querySelectorAll("#editAccountToggle button").forEach(b => {
+      const acct = b.dataset.editAccount, isActive = acct === editAccount;
+      b.className = `px-3 py-1 rounded-full transition-colors ${isActive ? (ACCT_COLORS[acct] + " text-white") : "text-slate-500 opacity-60"}`;
+    });
+  };
 
-    document.getElementById("trxAmount").value = "";
-    document.getElementById("trxDesc").value   = "";
+document.querySelectorAll("#editAccountToggle button").forEach(b => {
+  b.onclick = () => {
+    editAccount = b.dataset.editAccount;
+    window.applyEditAccountStyles?.();
+  };
+});
 
-    refreshUI();
-    saveStateToSheet();
-  });
+
+window.applyEditAccountStyles = applyEditAccountStyles;
+window.applyEditAccountStyles();
+
+
+  el("editSaveBtn").onclick = () => {
+    if (deletePendingIndex === null) return;
+    const [y, m, d] = el("editDate").value.split('-');
+    const isNowRec = el("editRecurring").checked;
+    
+    // Get existing item to check if it already had a group
+    const oldItem = transactions[deletePendingIndex];
+
+    const updatedTrx = {
+      ...oldItem,
+      date: `${m}/${d}/${y}`,
+      desc: el("editDesc").value.trim(),
+      category: el("editCat").value,
+      amount: parseFloat(el("editAmt").value) || 0,
+      account: editAccount,
+      recurring: isNowRec ? "Yes" : "No",
+      // If it's newly recurring, give it a group ID. If it was already, keep the old one.
+      groupId: oldItem.groupId || (isNowRec ? Date.now() : null)
+    };
+
+    transactions[deletePendingIndex] = updatedTrx;
+
+    // If it's recurring, sync the rest of the series
+    if (isNowRec) syncRecurringGroup(updatedTrx);
+
+    refreshUI(); saveStateToSheet(); hideOv();
+  };
 }
 
-
-
-  // Overlay cancel
-  if (deleteCancelBtn && overlay) {
-    deleteCancelBtn.addEventListener("click", () => {
-      deletePendingIndex = null;
-      overlay.classList.remove("show");
-      setTimeout(() => overlay.classList.add("hidden"), 150);
-    });
+(async () => {
+  try { 
+    await loadStateFromSheet(); 
+    // New step: Fill in any missing months that moved into range
+    runRecurringMaintenance(); 
   }
-
-  // Overlay confirm delete
-  if (deleteConfirmBtn && overlay) {
-    deleteConfirmBtn.addEventListener("click", () => {
-      if (deletePendingIndex !== null) {
-        transactions.splice(deletePendingIndex, 1);
-        deletePendingIndex = null;
-        refreshUI();
-        saveStateToSheet();
-      }
-      overlay.classList.remove("show");
-      setTimeout(() => overlay.classList.add("hidden"), 150);
-    });
-  }
-}
-
-// ======= INIT (async) =======
-(async function init() {
-  try {
-    await loadStateFromSheet();  // one-time sync from Sheets at page load
-
-    // Newest first: reverse order from sheet once on load
-    transactions.reverse();
-  } catch (err) {
-    console.error("Error loading from Sheets:", err);
-    budgets = [];
-    transactions = [];
-  }
-
-  // Wire up everything
+  catch (e) { console.error(e); budgets = []; transactions = []; }
+  
+  renderCategoryFilterUI();
   initBudgetControls();
   setupEventHandlers();
   setupAccountToggle();
-
-  refreshUI();
+  refreshUI(); // refreshUI will handle the sorting
 })();
+
 const categoryBtn      = document.getElementById("categoryBtn");
 const categoryMenu     = document.getElementById("categoryMenu");
 const categorySelected = document.getElementById("categorySelected");
 
 if (categoryBtn && categoryMenu && categorySelected) {
-  categoryBtn.addEventListener("click", () => {
-    categoryMenu.classList.toggle("hidden");
-  });
+  categoryBtn.addEventListener("click", () => categoryMenu.classList.toggle("hidden"));
 
-  document.querySelectorAll(".category-item").forEach((item) => {
+  document.querySelectorAll(".category-item").forEach(item => {
     item.addEventListener("click", () => {
-      const selected = item.getAttribute("data-cat") || "Uncategorized";
-
-      // Update the button label
+      const selected = (item.getAttribute("data-cat") || "Uncategorized").trim();
       categorySelected.textContent = selected;
       categoryMenu.classList.add("hidden");
-
       console.log("Category selected (label):", selected);
     });
   });
@@ -1014,232 +582,215 @@ if (categoryBtn && categoryMenu && categorySelected) {
 
 
 // ===================== ACCOUNT TOGGLE =====================
+const ACCT_COLORS = { Ayush: "bg-blue-500", Joint: "bg-emerald-600", Nupur: "bg-rose-500" };
 
 function applyAccountToggleStyles() {
-  const toggle = document.getElementById("accountToggle");
-  if (!toggle) return;
-
-  const buttons = toggle.querySelectorAll("button[data-account]");
-
-  buttons.forEach((b) => {
-    const acct = b.getAttribute("data-account");
-    const isActive = acct === currentAccount;
-
-    // Clear any old color classes
-    b.classList.remove(
-      "bg-blue-500",
-      "bg-emerald-600",
-      "bg-rose-500",
-      "text-white",
-      "text-blue-700",
-      "text-emerald-700",
-      "text-rose-700",
-      "opacity-60"
-    );
-
-    if (isActive) {
-      // Active state: solid color + white text
-      if (acct === "Ayush") {
-        b.classList.add("bg-blue-500", "text-white");
-      } else if (acct === "Joint") {
-        b.classList.add("bg-emerald-600", "text-white");
-      } else if (acct === "Nupur") {
-        b.classList.add("bg-rose-500", "text-white");
-      }
-    } else {
-      // Inactive state: faint / dimmed
-      b.classList.add("opacity-60");
-    }
+  document.querySelectorAll("#accountToggle button[data-account]").forEach(b => {
+    const acct = b.dataset.account, isActive = acct === currentAccount;
+    b.classList.remove(...Object.values(ACCT_COLORS), "text-white", "opacity-60");
+    isActive ? b.classList.add(ACCT_COLORS[acct], "text-white") : b.classList.add("opacity-60");
   });
 }
 
 function setupAccountToggle() {
-  const toggle = document.getElementById("accountToggle");
-  if (!toggle) return;
-
-  const buttons = toggle.querySelectorAll("button[data-account]");
-
-  buttons.forEach((btn) => {
-    btn.addEventListener("click", () => {
-      currentAccount = btn.getAttribute("data-account") || "Joint";
-      applyAccountToggleStyles();
-      console.log("Account selected:", currentAccount);
-    });
+  document.querySelectorAll("#accountToggle button[data-account]").forEach(b => {
+    b.onclick = () => { currentAccount = b.dataset.account; applyAccountToggleStyles(); };
   });
-
-  // Set initial styles (default Joint)
   applyAccountToggleStyles();
 }
 
-// ===================== ACCOUNT FILTER (Date header) =====================
+// ===================== DROPDOWNS & FILTERS =====================
+function renderCategoryFilterUI() {
+  const menu = el("categoryFilterMenu");
+  if (!menu) return;
 
-// Toggle dropdown
-document.getElementById("dateHeaderFilterBtn").addEventListener("click", () => {
-  const menu = document.getElementById("accountFilterMenu");
-  menu.classList.toggle("hidden");
+  const cats = Object.keys(CATEGORY_STYLES);
+  
+  // 1. Generate HTML for "All" plus every category in your styles object
+  menu.innerHTML = `
+    <label class="flex items-center gap-2 px-2 py-1.5 hover:bg-slate-50 rounded cursor-pointer border-b border-slate-100 mb-1">
+      <input type="checkbox" data-cat-filter-multi="All" ${activeCategoryFilters.includes("All") ? "checked" : ""}>
+      <span class="text-[10px] font-bold text-slate-700 uppercase tracking-tight">All Categories</span>
+    </label>
+    ${cats.map(cat => `
+      <label class="flex items-center gap-2 px-2 py-1 hover:bg-slate-50 rounded cursor-pointer">
+        <input type="checkbox" data-cat-filter-multi="${cat}" ${activeCategoryFilters.includes(cat) ? "checked" : ""}>
+        <span class="text-[11px] text-slate-600">${cat}</span>
+      </label>
+    `).join("")}
+  `;
+
+  // 2. Wire up the change events for the newly created elements
+  menu.querySelectorAll("[data-cat-filter-multi]").forEach(chk => {
+    chk.onchange = () => {
+      activeCategoryFilters = handleMultiFilter(chk, activeCategoryFilters, "data-cat-filter-multi");
+      refreshUI();
+    };
+  });
+}
+// 1. Unified Dropdown Toggle Logic
+[["dateHeaderFilterBtn", "accountFilterMenu"], ["categoryHeaderFilterBtn", "categoryFilterMenu"]].forEach(([btnId, menuId]) => {
+  const btn = el(btnId), menu = el(menuId);
+  if (!btn || !menu) return;
+
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    // Close other menus before toggling this one
+    document.querySelectorAll('.filter-menu').forEach(m => m !== menu && m.classList.add("hidden"));
+    menu.classList.toggle("hidden");
+  };
 });
 
-// Close dropdown when clicking outside
+// 2. Single Global Click Listener (Outside the loop)
 document.addEventListener("click", (e) => {
-  const menu = document.getElementById("accountFilterMenu");
-  const btn = document.getElementById("dateHeaderFilterBtn");
-
-  if (!menu.contains(e.target) && !btn.contains(e.target)) {
-    menu.classList.add("hidden");
-  }
-});
-
-
-// Handle checkbox changes (multi-select: All / Ayush / Joint / Nupur)
-document.querySelectorAll("[data-filter-multi]").forEach((chk) => {
-  chk.addEventListener("change", () => {
-    const val    = chk.dataset.filterMulti;
-    const allBox = document.querySelector("[data-filter-multi='All']");
-    const boxes  = document.querySelectorAll("[data-filter-multi]");
-
-    // ---- "All" clicked ----
-    if (val === "All") {
-      if (chk.checked) {
-        // Only "All" is active
-        activeAccountFilters = ["All"];
-        boxes.forEach((b) => {
-          if (b !== chk) b.checked = false;
-        });
-      } else {
-        // Prevent unchecking All with nothing else selected
-        // (user should turn on specific filters instead)
-        if (activeAccountFilters.length === 1 && activeAccountFilters[0] === "All") {
-          chk.checked = true;
-        }
-      }
-    } else {
-      // ---- Individual (Ayush / Joint / Nupur) clicked ----
-      if (chk.checked) {
-        activeAccountFilters.push(val);
-      } else {
-        activeAccountFilters = activeAccountFilters.filter((a) => a !== val);
-      }
-
-      // Remove "All" any time specific filters are used
-      activeAccountFilters = activeAccountFilters.filter((a) => a !== "All");
-
-      // Dedupe
-      activeAccountFilters = [...new Set(activeAccountFilters)];
-
-      // If nothing selected, fall back to All
-      if (activeAccountFilters.length === 0) {
-        activeAccountFilters = ["All"];
-        allBox.checked = true;
-      } else {
-        allBox.checked = false;
-      }
-    }
-
-    updateFilterDot();
-    refreshUI();
+  document.querySelectorAll('.filter-menu').forEach(menu => {
+    if (!menu.contains(e.target)) menu.classList.add("hidden");
   });
 });
 
+// 3. Multi-select Filter Logic (State Management)
+function handleMultiFilter(chk, filterArray, attrName) {
+  const val = chk.getAttribute(attrName), allBox = document.querySelector(`[${attrName}='All']`);
+  const boxes = document.querySelectorAll(`[${attrName}]`);
+
+  if (val === "All") {
+    if (chk.checked) {
+      boxes.forEach(b => b !== chk && (b.checked = false));
+      return ["All"];
+    }
+    return filterArray.length === 1 && filterArray[0] === "All" ? (chk.checked = true, ["All"]) : filterArray;
+  } 
+
+  let next = chk.checked ? [...filterArray, val] : filterArray.filter(v => v !== val);
+  next = [...new Set(next.filter(v => v !== "All"))];
+  
+  if (!next.length) { allBox.checked = true; return ["All"]; }
+  allBox.checked = false;
+  return next;
+}
+
+// 4. Event Wiring
+document.querySelectorAll("[data-filter-multi]").forEach(chk => {
+  chk.onchange = () => {
+    activeAccountFilters = handleMultiFilter(chk, activeAccountFilters, "data-filter-multi");
+    updateFilterDot(); refreshUI();
+  };
+});
+
+document.querySelectorAll("[data-cat-filter-multi]").forEach(chk => {
+  chk.onchange = () => {
+    activeCategoryFilters = handleMultiFilter(chk, activeCategoryFilters, "data-cat-filter-multi");
+    refreshUI();
+  };
+});
 
 function updateFilterDot() {
-  const dot = document.getElementById("dateHeaderFilterDot");
+  const dot = el("dateHeaderFilterDot"), set = new Set(activeAccountFilters.filter(a => a !== "All" && a !== "Joint"));
   if (!dot) return;
-
-  // Ignore "All" and "Joint" for dot color
-  const filteredSet = new Set(
-    activeAccountFilters.filter((a) => a !== "All" && a !== "Joint")
-  );
-
-  // No Ayush/Nupur selected → no dot
-  if (filteredSet.size === 0) {
-    dot.style.opacity = 0;
-    return;
+  dot.style.opacity = set.size ? 1 : 0;
+  if (set.size) {
+    dot.style.backgroundColor = set.has("Ayush") && set.has("Nupur") ? "#7c3aed" : (set.has("Ayush") ? "#2563eb" : "#dc2626");
   }
+}
+// ===================== TAB SWITCHER & INITIALIZATION =====================
+(function () {
+  const tabButtons = document.querySelectorAll(".tab-btn");
+  const cards = {
+    inputCard: document.getElementById("inputCard"),
+    tableCard: document.getElementById("tableCard"),
+    reportCard: document.getElementById("reportCard"),
+  };
 
-  const hasAyush = filteredSet.has("Ayush");
-  const hasNupur = filteredSet.has("Nupur");
+function setActiveTab(targetId) {
+  Object.keys(cards).forEach(id => cards[id]?.classList.toggle("hidden", id !== targetId));
+  
+  tabButtons.forEach(btn => {
+    const isActive = btn.getAttribute("data-tab-target") === targetId;
+    btn.className = "tab-btn flex-1 text-center px-4 py-2 text-xs sm:text-sm font-medium transition-colors duration-150 " +
+                    (isActive ? "bg-slate-200 text-slate-900" : "bg-transparent text-slate-600 hover:bg-slate-100");
+  });
 
-  dot.style.opacity = 1;
-
-  if (hasAyush && hasNupur) {
-    // Ayush + Nupur → purple
-    dot.style.backgroundColor = "#7c3aed";
-  } else if (hasAyush) {
-    // Ayush only → blue
-    dot.style.backgroundColor = "#2563eb";
-  } else if (hasNupur) {
-    // Nupur only → red
-    dot.style.backgroundColor = "#dc2626";
-  } else {
-    // Shouldn’t happen, but just in case
-    dot.style.opacity = 0;
+  if (targetId === "reportCard") {
+    // 1. Render data first
+    if (typeof window.refreshUI === "function") window.refreshUI();
+    
+    // 2. Snap to full width immediately after DOM update
+    const el = document.getElementById("reportSankey");
+    if (window.Plotly && el) {
+      setTimeout(() => {
+        Plotly.Plots.resize(el);
+      }, 0);
+    }
   }
 }
 
-// ===================== CATEGORY FILTER (Category header) =====================
+  async function refreshReportFromSheet() {
+    setActiveTab("reportCard");
+    if (typeof window.reloadStateFromSheet === "function") await window.reloadStateFromSheet();
+    if (typeof window.refreshUI === "function") window.refreshUI();
+    const el = document.getElementById("reportSankey");
+    if (window.Plotly && el) requestAnimationFrame(() => window.Plotly.Plots.resize(el));
+  }
 
-// Toggle dropdown
-const catHeaderBtn   = document.getElementById("categoryHeaderFilterBtn");
-const catFilterMenu  = document.getElementById("categoryFilterMenu");
-
-if (catHeaderBtn && catFilterMenu) {
-  catHeaderBtn.addEventListener("click", () => {
-    catFilterMenu.classList.toggle("hidden");
+  tabButtons.forEach(btn => {
+    btn.onclick = (e) => {
+      const target = btn.getAttribute("data-tab-target");
+      if (target === "reportCard") {
+        e.preventDefault();
+        refreshReportFromSheet();
+      } else {
+        setActiveTab(target);
+      }
+    };
   });
 
-  // Close when clicking outside
-  document.addEventListener("click", (e) => {
-    if (!catFilterMenu.contains(e.target) && !catHeaderBtn.contains(e.target)) {
-      catFilterMenu.classList.add("hidden");
+  setActiveTab("inputCard");
+})();
+
+
+// ======= AUTO-MAINTENANCE =======
+function runRecurringMaintenance() {
+  const now = new Date();
+  const boundary = new Date(now.getFullYear(), now.getMonth() + 2, 0);
+  
+  // 1. Get unique group IDs for active recurring series
+  const recurringGroups = [...new Set(transactions
+    .filter(t => t.recurring === "Yes" && t.groupId)
+    .map(t => t.groupId))];
+
+  let addedAny = false;
+
+  recurringGroups.forEach(gid => {
+    // 2. Find the latest entry in this group
+const groupItems = transactions.filter(t => t.groupId === gid);
+if (!groupItems.length) return;
+
+const latest = groupItems.reduce((prev, curr) =>
+  (parseMMDDYYYY(normalizeDateForSheetJS(curr.date))?.getTime() || 0) >
+  (parseMMDDYYYY(normalizeDateForSheetJS(prev.date))?.getTime() || 0) ? curr : prev
+);
+
+
+    // 3. If the latest entry is before our boundary, extend it
+let [m, d, y] = normalizeDateForSheetJS(latest.date).split("/").map(Number);
+    let currM = m, currY = y, safety = 0;
+
+    while (safety < 24) {
+      if (++currM > 12) { currM = 1; currY++; }
+      const loopDate = new Date(currY, currM - 1, d);
+      if (loopDate > boundary) break;
+
+      transactions.unshift({
+        ...latest,
+        id: Date.now() + (++safety),
+        date: normalizeDateForSheetJS(loopDate)
+      });
+      addedAny = true;
     }
   });
+
+  if (addedAny) {
+    console.log("Auto-maintenance: Extended recurring transactions.");
+    saveStateToSheet();
+  }
 }
-
-// Handle checkbox changes (multi-select: All / each category)
-document.querySelectorAll("[data-cat-filter-multi]").forEach((chk) => {
-  chk.addEventListener("change", () => {
-    const val    = chk.dataset.catFilterMulti;
-    const allBox = document.querySelector("[data-cat-filter-multi='All']");
-    const boxes  = document.querySelectorAll("[data-cat-filter-multi]");
-
-    // ---- "All" clicked ----
-    if (val === "All") {
-      if (chk.checked) {
-        // Only "All" is active
-        activeCategoryFilters = ["All"];
-        boxes.forEach((b) => {
-          if (b !== chk) b.checked = false;
-        });
-      } else {
-        // Prevent unchecking All when nothing else selected
-        if (activeCategoryFilters.length === 1 && activeCategoryFilters[0] === "All") {
-          chk.checked = true;
-        }
-      }
-    } else {
-      // ---- Individual category clicked ----
-      if (chk.checked) {
-        activeCategoryFilters.push(val);
-      } else {
-        activeCategoryFilters = activeCategoryFilters.filter((c) => c !== val);
-      }
-
-      // Remove "All" when using specific filters
-      activeCategoryFilters = activeCategoryFilters.filter((c) => c !== "All");
-
-      // Dedupe
-      activeCategoryFilters = [...new Set(activeCategoryFilters)];
-
-      // If nothing selected, fall back to All
-      if (activeCategoryFilters.length === 0) {
-        activeCategoryFilters = ["All"];
-        if (allBox) allBox.checked = true;
-      } else if (allBox) {
-        allBox.checked = false;
-      }
-    }
-
-    // Re-render table + header stats with new category filters
-    refreshUI();
-  });
-});
