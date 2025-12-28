@@ -20,6 +20,32 @@ let _sankeyRO = null;
 let _sankeyInitialized = false;
 let _sankeyLastSig = "";
 
+
+function forceFullSankeyRerender() {
+  const sDiv = document.getElementById("reportSankey");
+  const dDiv = document.getElementById("reportDetails");
+
+  _sankeyInitialized = false;
+  _sankeyLastSig = "";
+
+  if (sDiv) {
+    // IMPORTANT: purge kills Plotly listeners, so we must allow re-bind
+    sDiv._hasSankeyClick = false;
+
+    // If Plotly has already attached listeners, clear them too
+    try { sDiv.removeAllListeners?.("plotly_click"); } catch (_) {}
+
+    if (window.Plotly) {
+      try { Plotly.purge(sDiv); } catch (_) {}
+    }
+    sDiv.innerHTML = "";
+  }
+
+  if (dDiv) dDiv.innerHTML = "";
+}
+
+
+
 function ensureSankeyAutoFit() {
   const sDiv = document.getElementById("reportSankey");
   if (!sDiv || _sankeyRO) return;
@@ -159,7 +185,7 @@ function updateHeaderStats(visible) {
     if (el) el.innerHTML = `<span>Total ${formatCurrency(totalSpent)}</span><span class="ml-auto text-[11px] sm:text-xs font-normal text-slate-500">${visible.length === 1 ? "1 transaction" : visible.length + " transactions"}</span>`;
   });
 
-  [document.getElementById("monthHeaderSecondary"), document.getElementById("tableHeaderSecondary")].forEach(el => {
+[document.getElementById("monthHeaderSecondary"), document.getElementById("tableHeaderSecondary")].forEach(el => {
     if (!el) return;
     el.textContent = secText;
     el.style.color = state === "good" ? "#0f9d5a" : (state === "bad" ? "#dc2626" : "#64748b");
@@ -351,84 +377,113 @@ function renderReportSankey() {
   Plotly.react(sDiv, data, layout, config);
   _sankeyInitialized = true;
 
-  // Rebind click handler
-  // Note: Since we are using Plotly.react, the DOM element stays, but it's good practice to ensure the handler is there.
-  if (!sDiv._hasSankeyClick) {
-    sDiv._hasSankeyClick = true;
+// Always (re)bind after drawing — guarantees click works after purge/react
+try { sDiv.removeAllListeners?.("plotly_click"); } catch (_) {}
 
-    sDiv.on("plotly_click", ev => {
-      const pt = ev?.points?.[0];
-      if (!pt) return;
+sDiv.on("plotly_click", ev => {
+  const pt = ev?.points?.[0];
+  if (!pt) return;
 
-      let clickedLabel = "";
-      if (pt.target && pt.target.label) clickedLabel = pt.target.label;
-      else if (pt.label) clickedLabel = pt.label;
-      else clickedLabel = labels[pt.pointNumber] || "";
+  let clickedLabel = "";
+  if (pt.target && pt.target.label) clickedLabel = pt.target.label;
+  else if (pt.label) clickedLabel = pt.label;
+  else clickedLabel = labels[pt.pointNumber] || "";
 
-      const catName = normCat(clickedLabel.split("<br>")[0]);
-      if (!catName || catName === "Total") return;
+  const catName = normCat(clickedLabel.split("<br>")[0]);
+  if (!catName || catName === "Total") return;
 
-      const catTx = monthTx
-        .filter(t => normCat(t.category) === catName)
-        .sort((a, b) => Math.abs(Number(b.amount) || 0) - Math.abs(Number(a.amount) || 0));
+  const catTx = monthTx
+    .filter(t => normCat(t.category) === catName)
+    .sort((a, b) => Math.abs(Number(b.amount) || 0) - Math.abs(Number(a.amount) || 0));
 
-      const sum = catTx.reduce((s, t) => s + (Number(t.amount) || 0), 0);
+  const sum = catTx.reduce((s, t) => s + (Number(t.amount) || 0), 0);
 
-      dDiv.innerHTML = `
-        <div class="flex items-center justify-between mb-2">
-          <p class="text-xs font-semibold">${catName} — ${formatCurrency(sum)}</p>
-          <p class="text-[11px] text-slate-500">${catTx.length} items</p>
-        </div>
-        <div class="overflow-hidden border rounded-lg bg-white shadow-sm">
-          <table class="min-w-full text-[11px] sm:text-xs">
-            <thead class="bg-slate-50 sticky top-0">
-              <tr>
-                <th class="px-2 py-1 text-left text-slate-500">Date</th>
-                <th class="px-2 py-1 text-left text-slate-500">Desc</th>
-                <th class="px-2 py-1 text-right text-slate-500">Amt</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-slate-100">
-              ${catTx.map(t => `
-                <tr>
-                  <td class="px-2 py-1 text-slate-600">${formatDateForDisplay(t.date)}</td>
-                  <td class="px-2 py-1 text-slate-800">${t.desc || ""}</td>
-                  <td class="px-2 py-1 text-right font-medium">${formatCurrency(t.amount)}</td>
-                </tr>`).join("")}
-            </tbody>
-          </table>
-        </div>`;
-    });
-  }
-  
+  dDiv.innerHTML = `
+    <div class="flex items-center justify-between mb-2">
+      <p class="text-xs font-semibold">${catName} — ${formatCurrency(sum)}</p>
+      <p class="text-[11px] text-slate-500">${catTx.length} items</p>
+    </div>
+    <div class="overflow-hidden border rounded-lg bg-white shadow-sm">
+      <table class="min-w-full text-[11px] sm:text-xs">
+        <thead class="bg-slate-50 sticky top-0">
+          <tr>
+            <th class="px-2 py-1 text-left text-slate-500">Date</th>
+            <th class="px-2 py-1 text-left text-slate-500">Desc</th>
+            <th class="px-2 py-1 text-right text-slate-500">Amt</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-100">
+          ${catTx.map(t => `
+            <tr>
+              <td class="px-2 py-1 text-slate-600">${formatDateForDisplay(t.date)}</td>
+              <td class="px-2 py-1 text-slate-800">${t.desc || ""}</td>
+              <td class="px-2 py-1 text-right font-medium">${formatCurrency(t.amount)}</td>
+            </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>`;
+});
+
   requestAnimationFrame(() => Plotly.Plots.resize(sDiv));
 }
-
 function initBudgetControls() {
   const mIn = el("budgetMonthYear"), bIn = el("budgetAmount");
   if (!mIn || !bIn) return;
+
   if (!mIn.value) {
     const d = new Date();
     mIn.value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
   }
 
-  const sync = () => { const e = getBudgetEntryForMonthInput(mIn.value); bIn.value = e?.budget ?? ""; };
-  const save = () => { if (mIn.value) { upsertBudgetForMonthInput(mIn.value, bIn.value ? Number(bIn.value) : 0); saveStateToSheet(); refreshUI(); } };
+  const sync = () => {
+    const e = getBudgetEntryForMonthInput(mIn.value);
+    bIn.value = e?.budget ?? "";
+  };
 
+  const save = () => {
+    if (!mIn.value) return;
+    upsertBudgetForMonthInput(mIn.value, bIn.value ? Number(bIn.value) : 0);
+    saveStateToSheet();
+    refreshUI();
+  };
+
+  // Force Sankey rebuild whenever month changes (no fail)
+  const onMonthCommit = async () => {
+    // If you want Sankey to always reflect latest sheet data, uncomment:
+    // await loadStateFromSheet();
+
+    sync();
+    forceFullSankeyRerender();
+
+    // Ensure DOM value is committed before render
+    requestAnimationFrame(() => {
+      renderTransactions();
+      renderReportSankey(); // will rebuild fully due to forced reset above
+      if (window.Plotly) Plotly.Plots.resize(el("reportSankey"));
+    });
+  };
+
+  // `change` is the key event for <input type="month"> (fires when selection commits)
+  mIn.addEventListener("change", onMonthCommit);
+
+  // If you use flatpickr monthSelectPlugin, keep its onChange but route to the same handler
   if (window.flatpickr && window.monthSelectPlugin) {
     flatpickr(mIn, {
       altInput: true,
       plugins: [new monthSelectPlugin({ shorthand: false, dateFormat: "Y-m", altFormat: "F \\'y", theme: "light" })],
       defaultDate: mIn.value,
-      onChange: (d, s) => { mIn.value = s; sync(); refreshUI(); }
+      onChange: async (d, s) => { mIn.value = s; await onMonthCommit(); }
     });
   }
 
-  sync(); refreshUI();
-  mIn.onchange = () => { sync(); refreshUI(); };
+  sync();
+  refreshUI();
+
+  // Keep budget field saves as you had
   ["change", "blur"].forEach(ev => bIn.addEventListener(ev, save));
   bIn.onkeyup = e => e.key === "Enter" && save();
 }
+
 function setupEventHandlers() {
   const ov = el("deleteOverlay");
   const hideOv = () => { deletePendingIndex = null; ov.classList.remove("show"); setTimeout(() => ov.classList.add("hidden"), 150); };
