@@ -4,6 +4,7 @@ const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "Ju
 let deletePendingIndex = null;
 let budgets = [], transactions = [], activeTransactionId = null, currentAccount = "Joint", activeAccountFilters = ["All"], activeCategoryFilters = ["All"];
 let editAccount = "Joint"; // Separate state for the modal
+let _suppressCatToggleUntil = 0; // ignore the stray click after picking a description suggestion
 const CATEGORY_STYLES = {
   "Groceries": "bg-emerald-50 text-emerald-700", "Dining out": "bg-rose-50 text-rose-700", "Personal spending": "bg-indigo-50 text-indigo-700",
   "Housing": "bg-amber-50 text-amber-700", "Transportation": "bg-sky-50 text-sky-700", "Subscriptions": "bg-fuchsia-50 text-fuchsia-700",
@@ -198,6 +199,11 @@ function normalizeDateForSheetJS(dateInput) {
 }
 
 const formatDateForDisplay = v => normalizeDateForSheetJS(v);
+// Month/day only (no year) for the compact transactions table.
+const formatDateShort = v => {
+  const m = /^(\d{2})\/(\d{2})\/\d{4}$/.exec(normalizeDateForSheetJS(v));
+  return m ? `${m[1]}/${m[2]}` : normalizeDateForSheetJS(v);
+};
 const parseMMDDYYYY = (s) => {
   const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(String(s || "").trim());
   if (!m) return null;
@@ -301,16 +307,16 @@ function renderTransactions() {
 
     tr.className = "hover:bg-slate-50 cursor-pointer";
     tr.innerHTML = `
-      <td class="px-2 sm:px-3 py-1.5 text-slate-800 whitespace-nowrap">
-        <div class="flex items-center gap-1.5">
+      <td class="px-1.5 sm:px-2 py-1.5 text-slate-800 whitespace-nowrap">
+        <div class="flex items-center gap-1">
           ${dot ? `<span class="inline-block w-1.5 h-1.5 rounded-full ${dot}"></span>` : ""}
-          <span>${formatDateForDisplay(t.date)}</span>
+          <span>${formatDateShort(t.date)}</span>
         </div>
       </td>
       <td class="px-2 sm:px-3 py-1.5 text-slate-800">${t.desc || ""}</td>
-      <td class="px-2 sm:px-3 py-1.5">
-        <span class="category-pill rounded-full px-2 py-0.5 text-[11px] font-medium ${CATEGORY_STYLES[rawCat] || CATEGORY_STYLES["Miscellaneous"]}">
-          ${rawCat.length > 16 ? rawCat.slice(0, 15) + "…" : rawCat}
+      <td class="px-1.5 sm:px-2 py-1.5">
+        <span class="category-pill rounded-full px-1.5 py-0.5 text-[10px] font-medium ${CATEGORY_STYLES[rawCat] || CATEGORY_STYLES["Miscellaneous"]}">
+          ${rawCat.length > 10 ? rawCat.slice(0, 9) + "…" : rawCat}
         </span>
       </td>
       <td class="px-2 sm:px-3 py-1.5 text-right">
@@ -435,6 +441,9 @@ function setupDescAutocomplete() {
     input.value = s.text;
     applyCategory(s.category);
     hide();
+    // The tap that picked this row synthesizes a click that can land on the
+    // category button beneath the (now hidden) list — ignore it briefly.
+    _suppressCatToggleUntil = Date.now() + 500;
   };
 
   const hide = () => { box.classList.add("hidden"); activeIdx = -1; };
@@ -843,7 +852,10 @@ const categoryMenu     = document.getElementById("categoryMenu");
 const categorySelected = document.getElementById("categorySelected");
 
 if (categoryBtn && categoryMenu && categorySelected) {
-  categoryBtn.addEventListener("click", () => categoryMenu.classList.toggle("hidden"));
+  categoryBtn.addEventListener("click", () => {
+    if (Date.now() < _suppressCatToggleUntil) return; // ignore stray click from a suggestion tap
+    categoryMenu.classList.toggle("hidden");
+  });
 
   document.querySelectorAll(".category-item").forEach(item => {
     item.addEventListener("click", () => {

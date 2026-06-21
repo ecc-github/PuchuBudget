@@ -40,17 +40,18 @@
 
   #tableCard thead th,
   #transactionsTableBody td {
-    padding-left: 0.5rem;
-    padding-right: 0.5rem;
+    padding-left: 0.4rem;
+    padding-right: 0.4rem;
   }
 
-  /* Date | Description | Category | Amount */
+  /* Date | Description | Category | Amount — date & category kept tight so the
+     description gets the room. Date shows month/day only, so it can be narrow. */
   #tableCard thead th:nth-child(1),
-  #transactionsTableBody td:nth-child(1) { width: 5.5rem; }
+  #transactionsTableBody td:nth-child(1) { width: 3.25rem; }
   #tableCard thead th:nth-child(3),
-  #transactionsTableBody td:nth-child(3) { width: 5.5rem; }
+  #transactionsTableBody td:nth-child(3) { width: 4.25rem; }
   #tableCard thead th:nth-child(4),
-  #transactionsTableBody td:nth-child(4) { width: 5rem; }
+  #transactionsTableBody td:nth-child(4) { width: 4.75rem; }
 
   #transactionsTableBody td:nth-child(2) {
     max-width: 0;            /* allow flex column to shrink */
@@ -62,10 +63,33 @@
   .category-pill {
     min-width: 0;
     max-width: 100%;
-    font-size: 10px;
-    padding-left: 0.4rem;
-    padding-right: 0.4rem;
+    font-size: 9px;
+    padding-left: 0.35rem;
+    padding-right: 0.35rem;
   }
+}
+
+/* ===== Date / month inputs: normalize iOS Safari's native styling =====
+   iOS renders these with a gray pill background and extra height, so they
+   look bigger than the sibling text inputs. Strip the native chrome and match. */
+input[type="date"],
+input[type="month"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background-color: #fff;
+  min-height: 0;
+  line-height: 1.25;
+}
+/* Left-align the value and remove iOS's built-in inner margins/padding */
+input[type="date"]::-webkit-date-and-time-value,
+input[type="month"]::-webkit-date-and-time-value {
+  text-align: left;
+  margin: 0;
+  min-height: 0;
+}
+input[type="date"]::-webkit-datetime-edit,
+input[type="month"]::-webkit-datetime-edit {
+  padding: 0;
 }
 
 /* ===== Description autocomplete ===== */
@@ -126,8 +150,8 @@ tbody tr:nth-child(even) td {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 100px;    /* adjust as needed */
-  max-width: 100px;    /* ensures uniform size */
+  min-width: 74px;    /* adjust as needed */
+  max-width: 74px;    /* ensures uniform size */
   text-align: center;
   overflow: hidden;
   white-space: nowrap;
