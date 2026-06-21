@@ -71,25 +71,32 @@
 
 /* ===== Date / month inputs: normalize iOS Safari's native styling =====
    iOS renders these with a gray pill background and extra height, so they
-   look bigger than the sibling text inputs. Strip the native chrome and match. */
+   look bigger than the sibling text inputs. Strip the native chrome and match.
+   !important is needed because iOS' native control styling otherwise wins. */
 input[type="date"],
 input[type="month"] {
-  -webkit-appearance: none;
-  appearance: none;
-  background-color: #fff;
-  min-height: 0;
+  -webkit-appearance: none !important;
+  appearance: none !important;
+  background-color: #fff !important;
+  background-image: none !important;
+  box-shadow: none !important;
+  min-height: 0 !important;
+  height: auto !important;
   line-height: 1.25;
+  text-align: left;
 }
 /* Left-align the value and remove iOS's built-in inner margins/padding */
 input[type="date"]::-webkit-date-and-time-value,
 input[type="month"]::-webkit-date-and-time-value {
   text-align: left;
   margin: 0;
-  min-height: 0;
 }
 input[type="date"]::-webkit-datetime-edit,
-input[type="month"]::-webkit-datetime-edit {
+input[type="month"]::-webkit-datetime-edit,
+input[type="date"]::-webkit-datetime-edit-fields-wrapper,
+input[type="month"]::-webkit-datetime-edit-fields-wrapper {
   padding: 0;
+  background: transparent;
 }
 
 /* ===== Description autocomplete ===== */
