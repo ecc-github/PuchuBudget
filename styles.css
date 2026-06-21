@@ -80,19 +80,26 @@ input[type="month"] {
   background-color: #fff !important;
   background-image: none !important;
   box-shadow: none !important;
-  min-height: 0 !important;
-  height: auto !important;
-  line-height: 1.25;
   text-align: left;
+  /* Vertically center the value so it sits like the other inputs */
+  display: flex;
+  align-items: center;
 }
-/* Left-align the value and remove iOS's built-in inner margins/padding.
-   min-height reserves one text line so an empty / still-loading input keeps the
-   exact same height as a filled one (no "flat" collapsed look). */
+
+/* Hold a constant height whether the field is empty, loading, or filled.
+   When empty, iOS renders no inner value element, so the box would otherwise
+   collapse — min-height keeps it the exact size of the sibling text inputs.
+   Values match each context: form inputs use py-1 + text-sm; the edit modal
+   uses p-2 + text-xs. (line-height + vertical padding + 1px borders.) */
+#trxDate,
+#budgetMonthYear { min-height: 1.875rem; } /* 1.25rem + 0.5rem + 0.125rem */
+#editDate        { min-height: 2.125rem; } /* 1rem    + 1rem   + 0.125rem */
+
+/* Left-align the value and remove iOS's built-in inner margins/padding */
 input[type="date"]::-webkit-date-and-time-value,
 input[type="month"]::-webkit-date-and-time-value {
   text-align: left;
   margin: 0;
-  min-height: 1.2em;
 }
 input[type="date"]::-webkit-datetime-edit,
 input[type="month"]::-webkit-datetime-edit,
@@ -100,8 +107,6 @@ input[type="date"]::-webkit-datetime-edit-fields-wrapper,
 input[type="month"]::-webkit-datetime-edit-fields-wrapper {
   padding: 0;
   background: transparent;
-  min-height: 1.2em;
-  line-height: 1.2;
 }
 
 /* ===== Description autocomplete ===== */
