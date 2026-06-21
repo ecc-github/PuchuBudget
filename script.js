@@ -503,6 +503,14 @@ function setupDescAutocomplete() {
   });
 }
 
+// Default the "Add" date field to today so it's never empty (no flat look).
+function setDefaultTrxDate() {
+  const d = el("trxDate");
+  if (!d || d.value) return;
+  const n = new Date();
+  d.value = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
+}
+
 // ======= DATE INPUTS: always open the calendar, never allow typing =======
 function setupDatePickers() {
   const open = (input) => { try { input.showPicker?.(); } catch (_) {} };
@@ -844,6 +852,7 @@ window.applyEditAccountStyles();
   setupAccountToggle();
   setupDescAutocomplete();
   setupDatePickers();
+  setDefaultTrxDate();
   refreshUI(); // refreshUI will handle the sorting
 })();
 
