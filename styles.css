@@ -85,11 +85,14 @@ input[type="month"] {
   line-height: 1.25;
   text-align: left;
 }
-/* Left-align the value and remove iOS's built-in inner margins/padding */
+/* Left-align the value and remove iOS's built-in inner margins/padding.
+   min-height reserves one text line so an empty / still-loading input keeps the
+   exact same height as a filled one (no "flat" collapsed look). */
 input[type="date"]::-webkit-date-and-time-value,
 input[type="month"]::-webkit-date-and-time-value {
   text-align: left;
   margin: 0;
+  min-height: 1.2em;
 }
 input[type="date"]::-webkit-datetime-edit,
 input[type="month"]::-webkit-datetime-edit,
@@ -97,6 +100,8 @@ input[type="date"]::-webkit-datetime-edit-fields-wrapper,
 input[type="month"]::-webkit-datetime-edit-fields-wrapper {
   padding: 0;
   background: transparent;
+  min-height: 1.2em;
+  line-height: 1.2;
 }
 
 /* ===== Description autocomplete ===== */
